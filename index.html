@@ -1,3 +1,248 @@
-<HTML>
-  123
-</HTML>
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remano</title>
+    <style>
+        :root {
+            --primary: #A1C0C2;
+            --success: #729969;
+            --bg: #E6E7EB;
+            --text: #223125;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: var(--bg);
+            color: var(--text);
+        }
+
+        .container {
+            text-align: center;
+            background: #F6F6F6;
+            padding: 2.5rem;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            max-width: 640px;
+            width: 90%;
+        }
+
+        h2 { margin-top: 0; color: var(--text); }
+
+        button {
+            background-color: var(--primary);
+            color: #F6F6F6;
+            border: none;
+            padding: 14px 32px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 4px 12px #223125(52, 152, 219, 0.3);
+        }
+
+        button:hover:not(:disabled) {
+            background-color: #A1C0C2;
+            transform: translateY(-2px);
+        }
+
+        button:disabled {
+            background-color: #F6F6F6;
+            cursor: wait;
+            box-shadow: none;
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #000;
+            aspect-ratio: 16 / 9;
+            display: none;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Дзеркальне відображення */
+        }
+
+        #status-text {
+            margin-top: 1.2rem;
+            font-size: 0.95rem;
+            color: #7f8c8d;
+            min-height: 1.5em;
+        }
+
+        /* Стильне сповіщення від сервера */
+        #server-notification {
+            position: fixed;
+            bottom: -100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: var(--text);
+            color: var(--success);
+            padding: 18px 35px;
+            border-radius: 50px;
+            font-weight: 600;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.2);
+            transition: all 0.5s cubic-bezier(0.68, -0.55, 0.27, 1.55);
+            z-index: 1000;
+            border: 2px solid var(--success);
+        }
+
+        #server-notification.show {
+            bottom: 40px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h2>Система контролю відвідування</h2>
+        <button id="start-btn" disabled>Завантаження моделей...</button>
+        
+        <div class="video-wrapper" id="video-container">
+            <video id="video-stream" autoplay playsinline></video>
+        </div>
+
+        <p id="status-text">Ініціалізація MediaPipe Vision...</p>
+    </div>
+
+    <div id="server-notification">Очікуйте...</div>
+
+    <script type="module">
+        import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+        const startBtn = document.getElementById('start-btn');
+        const videoElement = document.getElementById('video-stream');
+        const videoContainer = document.getElementById('video-container');
+        const statusText = document.getElementById('status-text');
+        const notification = document.getElementById('server-notification');
+
+        let faceLandmarker;
+        let lastVideoTime = -1;
+        let canCapture = true; // Наш головний запобіжник
+
+        // 1. Завантаження ШІ моделей
+        async function initialize() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+                faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                        delegate: "GPU"
+                    },
+                    outputFaceBlendshapes: true,
+                    runningMode: "VIDEO",
+                    numFaces: 1
+                });
+                statusText.textContent = "ШІ готовий. Увімкніть камеру.";
+                startBtn.textContent = "Почати роботу";
+                startBtn.disabled = false;
+            } catch (e) {
+                statusText.textContent = "Помилка завантаження ШІ. Перевірте з'єднання.";
+            }
+        }
+        initialize();
+
+        // 2. Запуск стріму
+        startBtn.addEventListener('click', async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+                videoElement.srcObject = stream;
+                videoContainer.style.display = 'block';
+                startBtn.style.display = 'none';
+                videoElement.addEventListener("loadeddata", predictWebcam);
+                statusText.textContent = "Система активна. Усміхніться для аналізу.";
+            } catch (err) {
+                statusText.textContent = "Доступ до камери заборонено.";
+            }
+        });
+
+        // 3. Показ сповіщення
+        function showMessage(text) {
+            notification.textContent = text;
+            notification.classList.add('show');
+            setTimeout(() => notification.classList.remove('show'), 3500);
+        }
+
+        // 4. Відправка на Python з ПОДВІЙНИМ ЗАХИСТОМ
+        async function sendFrameToServer() {
+            canCapture = false; // Блокуємо нові спроби негайно
+            statusText.textContent = "Кадр захоплено! Обробка...";
+
+            const canvas = document.createElement('canvas');
+            canvas.width = videoElement.videoWidth;
+            canvas.height = videoElement.videoHeight;
+            const ctx = canvas.getContext('2d');
+            
+            // Дзеркальне відображення для коректного збереження
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+            
+            canvas.toBlob(async (blob) => {
+                const formData = new FormData();
+                formData.append('image', blob, 'capture.jpg');
+
+                // Створюємо два проміси для "Подвійного Замка"
+                const serverRequest = fetch('http://127.0.0.1:5000/analyze-frame', {
+                    method: 'POST',
+                    body: formData
+                }).then(r => r.json());
+
+                const minWaitTimer = new Promise(resolve => setTimeout(resolve, 4000));
+
+                try {
+                    // Чекаємо завершення обох: і сервера, і 4-х секунд
+                    const [data, _] = await Promise.all([serverRequest, minWaitTimer]);
+                    
+                    if (data.text) showMessage(data.text);
+                    statusText.textContent = "Готово. Можна усміхнутися знову!";
+
+                } catch (err) {
+                    console.error(err);
+                    showMessage("Помилка зв'язку з Python");
+                    // Навіть при помилці чекаємо таймер, щоб не спамити запитами
+                    await minWaitTimer; 
+                    statusText.textContent = "Помилка сервера. Спробуйте пізніше.";
+                } finally {
+                    canCapture = true; // Розблокування після виконання обох умов
+                }
+            }, 'image/jpeg', 0.9);
+        }
+
+        // 5. Цикл детекції
+        async function predictWebcam() {
+            if (videoElement.currentTime !== lastVideoTime) {
+                lastVideoTime = videoElement.currentTime;
+                const results = faceLandmarker.detectForVideo(videoElement, performance.now());
+                
+                if (results.faceBlendshapes?.length > 0) {
+                    const shapes = results.faceBlendshapes[0].categories;
+                    const smileL = shapes.find(s => s.categoryName === 'mouthSmileLeft').score;
+                    const smileR = shapes.find(s => s.categoryName === 'mouthSmileRight').score;
+                    
+                    // Якщо усмішка знайдена і система не заблокована
+                    if ((smileL > 0.6 || smileR > 0.6) && canCapture) {
+                        sendFrameToServer();
+                    }
+                }
+            }
+            requestAnimationFrame(predictWebcam);
+        }
+    </script>
+</body>
+</html>
